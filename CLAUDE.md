@@ -154,3 +154,75 @@ Computation backends: `jaxpower`, `pypower`, `pyrecon`.
 | `acm/hod/box.yaml` | HOD parameter defaults for cubic boxes |
 | `acm/hod/lightcone.yaml` | HOD parameter defaults for lightcones |
 | `scripts/bgs/inference/config_*.yaml` | BGS emulator paths and inference settings |
+
+---
+
+## Running Scripts Interactively at NERSC
+
+### Python environment
+
+Always use the **cosmodesi** environment (maintained by A. Dematti); it ships
+pycorr, fitsio, scipy, pandas, and the full LSS stack:
+
+```bash
+unset PYTHONPATH   # clear any ~/.bashrc override first
+source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
+```
+
+Available tags: `main` (rolling), `2026_02`, `2025_12`, `2025_05`, `dr1`.
+
+### Interactive allocation
+
+```bash
+salloc -N 1 -C cpu -q interactive -t 30:00 -A desi -c 8 --mem=32G
+```
+
+Increase `-t` if the job needs more than 30 min (Delaunay on large catalogs
+can take 5–10 min for ~125k points).
+
+### Full sequence
+
+```bash
+# 1. From the login node — request a node
+salloc -N 1 -C cpu -q interactive -t 30:00 -A desi -c 8 --mem=32G
+
+# 2. On the compute node — load environment
+unset PYTHONPATH
+source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
+
+# 3. Run the script
+cd /pscratch/sd/f/forero/DESI_astra
+srun -n 1 -c 8 python scripts/astra_box_basic.py
+```
+
+### Basic ASTRA box script
+
+`scripts/astra_box_basic.py` — end-to-end demo pipeline:
+
+1. **Load** `c000_ph000/seed0/hod000.fits` from the EMC HOD catalog
+2. **Apply RSD** (los=z): positions = `X_PERP`/`Y_PERP`/`Z_RSD`, AP-corrected by `Q_PAR`/`Q_PERP` from the FITS header
+3. **Cut** a 500 Mpc/h cube centred at the origin (~62k galaxies)
+4. **Generate** uniform randoms (`N_RAND=1×` the data count)
+5. **Run ASTRA**: Delaunay triangulation → local density `r = (ndata−nrand)/(ndata+nrand)` for every point (data and randoms alike)
+6. **Split into quantiles**: bin edges derived from the data `r` distribution via `pd.qcut`; same edges applied to randoms via `pd.cut` — both populations split at identical density thresholds
+7. **Save** per-quantile files:
+   - `data_quantile_q{1..4}.npy` — galaxy positions
+   - `rand_quantile_q{1..4}.npy` — random positions (carry real density information, not uniform)
+8. **Generate geometry randoms** (`N_RAND_GEOM=5×` data, uniform in the subbox, separate from ASTRA randoms) — required because the subbox has **open boundaries, not periodic BC**
+9. **Compute 2PCF** (monopole ℓ=0 + quadrupole ℓ=2) for each data and random quantile using the **Landy-Szalay estimator** `(DD − 2DR + RR) / RR` with the geometry randoms; no `boxsize` argument passed to pycorr
+10. **Save** `multipoles_tpcf_data_q{q}.npz` and `multipoles_tpcf_rand_q{q}.npz` (keys: `s`, `xi0`, `xi2`)
+
+> **Note on randoms**: Two separate random catalogs are used.  The *ASTRA randoms* (`N_RAND=1×`) enter the Delaunay triangulation and get their own density label — their split into quantiles is physically meaningful.  The *geometry randoms* (`N_RAND_GEOM=5×`, generated with `SEED+1`) are uniform and used only to correct for the open-boundary geometry in the LS estimator.
+
+Output directory: `/pscratch/sd/f/forero/sims/test/astra_basic/`
+
+`scripts/plot_astra_basic.py` — produces 5 figures in `…/plots/`:
+
+| File | Content |
+|------|---------|
+| `data_monopole_per_quantile.png` | s²ξ₀(s) for data Q1–Q4 |
+| `data_quadrupole_per_quantile.png` | s²ξ₂(s) for data Q1–Q4 |
+| `data_multipoles_all_quantiles.png` | Monopole + quadrupole side by side |
+| `rand_monopole_per_quantile.png` | s²ξ₀(s) for random Q1–Q4 (non-zero because randoms trace the cosmic web) |
+| `rand_quadrupole_per_quantile.png` | s²ξ₂(s) for random Q1–Q4 |
+| `data_vs_rand_monopole.png` | Data vs randoms monopole, one panel per quantile |
